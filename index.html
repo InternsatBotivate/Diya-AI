@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Diya Analytics Agent</title>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600&display=swap" rel="stylesheet"/>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    :root {
+      --body-bg: #f4f6fc;
+      --chat-bg: #ffffff;
+      --gradient-start: #8998ff;
+      --gradient-end: #a672ff;
+      --user-msg-bg: #eef1f8;
+      --text-dark: #333;
+      --text-light: #fcfcfc;
+      --text-secondary: #6c757d;
+      --border-color: #e3e6ed;
+      --shadow: 0 10px 30px -10px rgba(137, 152, 255, 0.2);
+      --font-family: 'Poppins', sans-serif;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-family);
+      background-color: var(--body-bg);
+      color: var(--text-dark);
+      display: flex; justify-content: center; align-items: center;
+      height: 100vh; padding: 16px;
+    }
+    .chat-container {
+      width: 100%; max-width: 800px; height: 100%; max-height: 90vh;
+      display: flex; flex-direction: column;
+      background: var(--chat-bg); border-radius: 24px; box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .chat-header {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 20px 24px;
+      background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+      color: var(--text-light);
+    }
+    .chat-header h1 { font-size: 1.1rem; font-weight: 600; }
+    .chat-header p { font-size: 0.8rem; opacity: 0.8; }
+    .chat-messages {
+      flex-grow: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px;
+    }
+    .chat-messages::-webkit-scrollbar { width: 6px; }
+    .chat-messages::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
+    .message { display: flex; max-width: 80%; animation: fadeIn 0.4s ease; }
+    @keyframes fadeIn { from{opacity:0;transform:translateY(10px);} to{opacity:1;transform:translateY(0);} }
+    .bubble { padding: 12px 18px; border-radius: 20px; font-size: 0.95rem; line-height: 1.5; }
+    .bot-message { align-self: flex-start; }
+    .bot-message .bubble {
+      background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+      color: var(--text-light); border-bottom-left-radius: 4px;
+    }
+    .user-message { align-self: flex-end; }
+    .user-message .bubble {
+      background: var(--user-msg-bg); color: var(--text-dark); border-bottom-right-radius: 4px;
+    }
+    .chat-footer { border-top: 1px solid var(--border-color); }
+    .chat-input-area { padding: 16px 24px; }
+    .input-wrapper {
+      display: flex; align-items: center; background: var(--user-msg-bg); border-radius: 99px; padding: 6px;
+    }
+    #chat-input {
+      flex-grow: 1; border: none; outline: none; background: transparent;
+      padding: 10px 16px; font-size: 1rem; color: var(--text-dark);
+    }
+    #send-btn {
+      border: none; background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+      color: white; width: 44px; height: 44px; border-radius: 50%; cursor: pointer;
+      display: flex; justify-content: center; align-items: center;
+    }
+    .powered-by { text-align: center; font-size: 0.75rem; color: var(--text-secondary); padding: 8px 0; }
+    .powered-by a { color: var(--gradient-start); text-decoration: none; }
+    @media (max-width: 600px) {
+      .chat-container { max-height: 100vh; border-radius: 0; }
+      .chat-header, .chat-messages, .chat-input-area { padding: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="chat-container">
+    <header class="chat-header">
+      <div>
+        <h1>Diya Analytics Agent</h1>
+        <p>Online</p>
+      </div>
+    </header>
+
+    <main class="chat-messages" id="chat-messages"></main>
+
+    <footer class="chat-footer">
+      <div class="chat-input-area">
+        <div class="input-wrapper">
+          <input id="chat-input" placeholder="Ask about the data..."/>
+          <button id="send-btn" aria-label="Send">
+            ➤
+          </button>
+        </div>
+      </div>
+      <div class="powered-by">Powered by <a href="https://botivate.in" target="_blank">Botivate</a></div>
+    </footer>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const API_BASE_URL = 'http://localhost:8000'; // or prod URL
+      const chatMessages = document.getElementById('chat-messages');
+      const chatInput = document.getElementById('chat-input');
+      const sendBtn = document.getElementById('send-btn');
+      let threadId = null, bufferInterval = null;
+
+      const BUFFER_MESSAGES = [
+        "Analyzing the sheet…",
+        "Crunching the numbers…",
+        "Extracting key metrics…",
+        "Preparing insights for you…",
+        "Finalizing response…"
+      ];
+
+      const addMessage = (sender, text) => {
+        if (!text) return;
+        const wrapper = document.createElement('div');
+        wrapper.classList.add('message', `${sender}-message`);
+        const bubble = document.createElement('div');
+        bubble.classList.add('bubble');
+        bubble.innerHTML = sender === 'bot' ? marked.parse(text) : text;
+        wrapper.appendChild(bubble);
+        chatMessages.appendChild(wrapper);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+      };
+
+      const toggleBuffer = (show) => {
+        let indicator = document.getElementById('buffer');
+        if (show) {
+          if (!indicator) {
+            indicator = document.createElement('div');
+            indicator.id = 'buffer';
+            indicator.classList.add('message','bot-message');
+            indicator.innerHTML = `<div class="bubble" id="buffer-text">Analyzing the sheet…</div>`;
+            chatMessages.appendChild(indicator);
+            let i=0;
+            bufferInterval=setInterval(()=>{
+              i=(i+1)%BUFFER_MESSAGES.length;
+              document.getElementById('buffer-text').textContent=BUFFER_MESSAGES[i];
+            },2000);
+          }
+        } else {
+          if (indicator) indicator.remove();
+          if (bufferInterval) clearInterval(bufferInterval);
+        }
+      };
+
+      const sendMessage = async () => {
+        const msg = chatInput.value.trim();
+        if (!msg) return;
+        addMessage('user', msg);
+        chatInput.value = '';
+        toggleBuffer(true);
+
+        try {
+          const res = await fetch(`${API_BASE_URL}/chat`, {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({message:msg, thread_id:threadId})
+          });
+          const data = await res.json();
+          toggleBuffer(false);
+          if (data.thread_id && !threadId) threadId = data.thread_id;
+          addMessage('bot', data.reply || "I couldn't process that.");
+        } catch(err) {
+          toggleBuffer(false);
+          addMessage('bot', `❌ Error: ${err.message}`);
+        }
+      };
+
+      sendBtn.addEventListener('click', sendMessage);
+      chatInput.addEventListener('keydown', e => { if(e.key==='Enter'){ e.preventDefault(); sendMessage(); } });
+
+      // Welcome
+      setTimeout(()=>addMessage('bot',"👋 Hello! I'm Diya, your analytics agent. Ask me about your business data."),500);
+    });
+  </script>
+</body>
+</html>
