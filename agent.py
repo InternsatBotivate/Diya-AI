@@ -98,11 +98,12 @@ class Condition(BaseModel):
     value: Any
 
 class RoutePlan(BaseModel):
-    intent: Literal["tabular_agg", "semantic_answer"]
+    intent: Literal["tabular_agg", "semantic_answer", "lookup"]
     sheet: Optional[str] = None
     operation: Optional[Literal["COUNT", "SUM", "AVG", "MIN", "MAX"]] = None
     target_column: Optional[str] = None
     conditions: List[Condition] = []
+    lookup_values: Optional[List[str]] = None
 
 # -------- Agent --------
 class SheetRAGAgent:
@@ -276,16 +277,23 @@ class SheetRAGAgent:
         return plan
 
     def _route(self, question: str, available_sheets: List[str]) -> RoutePlan:
+        q_lower = question.lower()
+
+        # quick regex-based lookup detection
+        lookup_matches = re.findall(r"(?:id|task id|po\s*no|employee|name)\s*([A-Za-z0-9\-_]+)", q_lower)
+        if lookup_matches:
+            return RoutePlan(
+                intent="lookup",
+                lookup_values=lookup_matches
+            )
+
         llm = OpenAI(model=MODEL, api_key=OPENAI_API_KEY)
         sys = (
             "You are Diya, an AI Agent for Botivate LLP. "
             "Your role is to analyze business data and provide clear, full-sentence answers. "
             "Never give one-word answers. Never ask follow-ups. "
             "If numeric (count/sum/avg/min/max), choose intent='tabular_agg'. "
-            "For 'pending tasks' or 'pending rows', always add a condition: "
-            "column='Status', op='==', value='Pending'. "
-            "For cost/total value, use Cost (Quantity*Rate). "
-            "For time like 'today','this week','last month', use Date column with op='between'. "
+            "If user asks about details of a row (by id, task, po no, employee, name, etc.), use intent='lookup'. "
             "Otherwise, use intent='semantic_answer'. Respond in JSON only."
         )
         history_text = "\n".join([f"User: {h['user']}\nDiya: {h['diya']}" for h in CONVERSATION_HISTORY[-5:]])
@@ -297,26 +305,9 @@ class SheetRAGAgent:
         try:
             data = json.loads(txt)
             data = self._normalize_plan(data)
-
-            q_lower = question.lower()
-            has_status_condition = any(
-                _normalize_name(c.get("column", "")) == "status"
-                for c in data.get("conditions", [])
-            )
-
-            # 🔹 Only add Status=Pending if "pending" is in the *question*
-            # AND not just because the sheet is called "PO Pending"
-            if ("pending" in q_lower 
-                and not has_status_condition
-                and not any("po pending" in q_lower and _normalize_name(s) == "po pending" for s in available_sheets)):
-                data.setdefault("conditions", []).append(
-                    {"column": "Status", "op": "==", "value": "Pending"}
-                )
-
             return RoutePlan(**data)
         except Exception as e:
             return RoutePlan(intent="semantic_answer")
-
 
     def _semantic_answer(self, question: str) -> str:
         self.ensure_index()
@@ -324,6 +315,70 @@ class SheetRAGAgent:
         qe = self._index.as_query_engine(llm=llm)
         resp = qe.query(question)
         return str(resp)
+
+    def _node_lookup(self, state: "SheetRAGAgent.State") -> "SheetRAGAgent.State":
+        def _format_value(k: str, v: str) -> str:
+            """Clean and format raw values for nicer presentation."""
+            # convert ISO date to human-friendly
+            if "date" in k.lower() or "timestamp" in k.lower():
+                try:
+                    dt = pd.to_datetime(v)
+                    return dt.strftime("%d %B %Y")
+                except Exception:
+                    return v
+            # round delay values
+            if "delay" in k.lower():
+                try:
+                    return f"{round(float(v))} days"
+                except Exception:
+                    return v
+            return v
+
+        try:
+            dfs, _ = self._build_dataframes()
+            found_rows = []
+
+            for sheet, df in dfs.items():
+                for lookup_val in (state.route.lookup_values or []):
+                    for col in df.columns:
+                        matches = df[df[col].astype(str).str.strip().str.lower() == str(lookup_val).lower()]
+                        if not matches.empty:
+                            for _, row in matches.iterrows():
+                                details = {k: _format_value(k, str(v)) for k, v in row.items() if pd.notna(v) and v != ""}
+                                found_rows.append((sheet, col, lookup_val, details))
+
+            if not found_rows:
+                state.answer = f"Sorry, I couldn’t find any details for {', '.join(state.route.lookup_values or [])}."
+                return state
+
+            summaries = []
+            llm = OpenAI(model=MODEL, api_key=OPENAI_API_KEY)
+
+            for sheet, col, val, details in found_rows:
+                kv_text = "\n".join([f"{k}: {v}" for k, v in details.items()])
+                prompt = (
+                    f"Summarize the following task details in a clear, natural sentence:\n\n{kv_text}\n\n"
+                    f"Be concise, human-friendly, and highlight only the most important fields "
+                    f"(Assigned To, Given By, Department, Task Description, Start Date, Status, Delay)."
+                )
+                resp = llm.complete(prompt=prompt)
+                nice_summary = resp.text.strip()
+
+                # format details as markdown table
+                table_rows = "\n".join([f"| {k} | {v} |" for k, v in details.items()])
+                raw_details = f"| Field | Value |\n|-------|-------|\n{table_rows}"
+
+                text = (
+                    f"### 🔎 Lookup `{val}` (from sheet **{sheet}**, matched in '{col}')\n\n"
+                    f"**Summary:** {nice_summary}\n\n"
+                    f"**Full Details:**\n{raw_details}"
+                )
+                summaries.append(text)
+
+            state.answer = "\n\n---\n\n".join(summaries)
+        except Exception as e:
+            state.answer = f"I encountered a lookup error: {e}"
+        return state
 
     # --- LangGraph orchestration ---
     class State(BaseModel):
@@ -352,20 +407,27 @@ class SheetRAGAgent:
         return state
 
     def _should_tabular(self, state: "SheetRAGAgent.State") -> str:
-        return "tabular" if state.route and state.route.intent == "tabular_agg" else "rag"
+        if state.route and state.route.intent == "tabular_agg":
+            return "tabular"
+        if state.route and state.route.intent == "lookup":
+            return "lookup"
+        return "rag"
 
     def _build_graph(self):
         g = StateGraph(self.State)
         g.add_node("route", self._node_route)
         g.add_node("tabular", self._node_tabular)
         g.add_node("rag", self._node_rag)
+        g.add_node("lookup", self._node_lookup)
         g.set_entry_point("route")
         g.add_conditional_edges("route", self._should_tabular, {
             "tabular": "tabular",
             "rag": "rag",
+            "lookup": "lookup",
         })
         g.add_edge("tabular", END)
         g.add_edge("rag", END)
+        g.add_edge("lookup", END)
         return g.compile()
 
     # --- Public API ---
@@ -408,7 +470,6 @@ class SheetRAGAgent:
         # Save conversation
         CONVERSATION_HISTORY.append({"user": message, "diya": reply})
         return reply
-
 
     def refresh(self, force: bool = True) -> None:
         if force:
