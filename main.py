@@ -28,11 +28,18 @@ agent = SheetRAGAgent()
 # --- Startup ---
 @app.on_event("startup")
 async def on_startup():
+    global INDEX_BUILDING
     try:
+        # Try loading persisted index
         agent.refresh(force=False)
+        if agent._index is None:  # no index found
+            logger.info("[Startup] No index found, scheduling background build…")
+            INDEX_BUILDING = True
+            asyncio.create_task(build_index_background())
+        else:
+            logger.info("[Startup] Index loaded successfully.")
     except Exception as e:
         logger.error(f"[Startup] Failed to init index: {e}\n{traceback.format_exc()}")
-
 
 # --- Healthcheck ---
 @app.get("/health")
@@ -73,22 +80,45 @@ def refresh():
         logger.error(f"[Refresh ERROR] {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"refresh error: {e}")
 
-
-# --- Chat endpoint ---
 @app.post("/chat")
 async def chat(req: Request):
-    try:
-        body = await req.json()
-        message = (body.get("message") or "").strip()
-        if not message:
-            raise HTTPException(status_code=400, detail="message is required")
+    global INDEX_BUILDING
 
+    body = await req.json()
+    message = (body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    # Handle when index is not ready
+    if agent._index is None:
+        if INDEX_BUILDING:
+            return {
+                "reply": (
+                    "⏳ I’m still building the knowledge index in the background. "
+                    "This can take some time (around 30 minutes). "
+                    "Please try again later, and I’ll be ready to answer with full context."
+                )
+            }
+        else:
+            return {
+                "reply": (
+                    "⚠️ The knowledge index is not available yet. "
+                    "You can trigger a rebuild using `/refresh`, or wait until it is built automatically."
+                )
+            }
+
+    # Normal case: index is ready
+    try:
         reply = agent.chat(message)
         return {"reply": reply}
     except Exception as e:
         logger.error(f"[Chat ERROR] {e}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"chat error: {e}")
-
+        return {
+            "reply": (
+                "⚠️ I ran into an error while processing your request. "
+                "Please try again later."
+            )
+        }
 
 # --- Debug echo (optional helper) ---
 @app.post("/debug/echo")

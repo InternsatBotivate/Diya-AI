@@ -3,6 +3,7 @@ import os
 import re
 import json
 import logging
+from tqdm import tqdm
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from datetime import datetime, timedelta
@@ -20,6 +21,7 @@ from llama_index.core import (
 )
 from llama_index.core.node_parser import SimpleNodeParser
 from llama_index.llms.openai import OpenAI
+from llama_index.embeddings.openai import OpenAIEmbedding
 
 from langgraph.graph import StateGraph, END
 
@@ -160,9 +162,18 @@ class SheetRAGAgent:
         data = self.fetch_sheet_data()
         docs = self._docs_from_data(data)
         nodes = self._parser.get_nodes_from_documents(docs)
+
+        # Create embedding model
+        embed_model = OpenAIEmbedding(model="text-embedding-3-small", api_key=OPENAI_API_KEY)
+
+        # tqdm progress bar in logs
+        for node in tqdm(nodes, desc="Embedding nodes", unit="row"):
+            node.embedding = embed_model.get_text_embedding(node.get_content())
+
         storage_ctx = StorageContext.from_defaults()
         self._index = VectorStoreIndex(nodes, storage_context=storage_ctx)
         self._index.storage_context.persist(persist_dir=PERSIST_DIR)
+
         logger.info(
             "[Index] Built with %d rows from %d sheets.",
             sum(len(v) for v in data.values()),
